@@ -18,7 +18,7 @@ class ML:
 
 		parameters = {'C': np.logspace( -6, 6, 20 ) }
 
-		logisticModel = LogisticRegression( penalty = 'l1' )
+		logisticModel = LogisticRegression( penalty = 'l2' )
 
 		if self.kfold > 1:
 			clf = grid_search.GridSearchCV( logisticModel, parameters, cv = self.kfold , n_jobs = self.cores )
@@ -31,7 +31,7 @@ class ML:
 
 		#print ( bestparam )
 
-		logisticModel = LogisticRegression( penalty = 'l1', C = self.bestlasso ).fit( xtrain, ytrain)
+		logisticModel = LogisticRegression( penalty = 'l2', C = self.bestlasso ).fit( xtrain, ytrain)
 
 
 
@@ -63,11 +63,15 @@ if __name__ == '__main__':
 
 	ytest = ytrain
 
-	print ( xtrain.shape, ytrain.shape, xtest.shape, ytest.shape )
 
 	#print ( ytrain )
 
 	#sys.exit()
+
+	xtrain = np.loadtxt(sys.argv[1]); ytrain = np.loadtxt(sys.argv[2]);
+	xtest = np.loadtxt(sys.argv[3]); ytest = np.loadtxt(sys.argv[4])
+	print ( xtrain.shape, ytrain.shape, xtest.shape, ytest.shape )
+
 
 	# learn model on train data with 10 fold cross-validation
 	lasso = ML()

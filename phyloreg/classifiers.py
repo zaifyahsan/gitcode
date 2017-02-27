@@ -236,6 +236,8 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
             """
             o = 0.0
 
+            o3 = 0.0
+
             # Likelihood
             for i in xrange(X.shape[0]):
                 pi = 1.0 / (1.0 + np.exp(-np.dot(w, X[i])))
@@ -273,7 +275,7 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
                     O_i[idx_by_species[X_species[i]]] = x_i
 
                     f = np.dot(O_i, w)
-                    o3 = self.beta * 2.0 * np.dot(np.dot(f.T, L), f) / (X.shape[0] * L.shape[0]**2)
+                    o3 += self.beta * 2.0 * np.dot(np.dot(f.T, L), f) / (X.shape[0] * L.shape[0]**2)
 
             o = o1 - o2 - o3
 

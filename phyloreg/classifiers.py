@@ -280,8 +280,10 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
                     O_i[x_orthologs_species] = x_orthologs_feats
                     O_i[idx_by_species[X_species[i]]] = x_i
 
-                    f = np.dot(O_i, w)
-                    o3 += self.beta * 2.0 * np.dot(np.dot(f.T, L), f) / (X.shape[0] * L.shape[0]**2)
+                    p = 1.0 / (1.0 + np.exp(-np.dot(O_i, w)))
+                    for k in xrange(O_i.shape[0]):
+                        for l in xrange(O_i.shape[1]):
+                            o3 += self.beta * species_graph_adjacency[k, l] * (p[k] - p[l])**2
 
             o = o1 - o2 - o3
 
@@ -347,7 +349,33 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
             logging.debug("Iteration %d -- Objective: %.6f -- Learning rate: %.6f" % (iterations, objective_val, learning_rate))
 
             p = 1.0 / (1.0 + np.exp(-np.dot(X, w)))
-            gradient = np.dot(X.T, y - p) / X.shape[0] - 2.0 * self.alpha * w - 4.0 * self.beta * np.dot(OLO, w) / (X.shape[0] * L.shape[0]**2)
+            gradient_t1_t2 = np.dot(X.T, y - p) / X.shape[0] - 2.0 * self.alpha * w
+
+            gradient_t3 = np.zeros(X.shape[1])
+            for t in xrange(len(gradient_t3)):
+                for i, x_i in enumerate(X):
+                    # H5py doesn't support integer keys
+                    if isinstance(orthologs, h.File):
+                        i = str(i)
+
+                    if len(orthologs[i]["species"]) > 0:
+                        # Load the orthologs of X and create a matrix that also contains x
+                        x_orthologs_species = [idx_by_species[s] for s in orthologs[i]["species"]]
+                        x_orthologs_feats = orthologs[i]["X"]
+                        if self.fit_intercept:
+                            x_orthologs_feats = np.hstack((x_orthologs_feats, np.ones(x_orthologs_feats.shape[0]).reshape(-1, 1)))  # Add this bias term
+
+                        O_i = np.zeros((len(species_graph_names), x_orthologs_feats.shape[1]))
+                        O_i[x_orthologs_species] = x_orthologs_feats
+                        O_i[idx_by_species[X_species[i]]] = x_i
+
+                        p = 1.0 / (1.0 + np.exp(-np.dot(O_i, w)))
+                        top = np.exp(-np.dot(O_i, w))
+                        for k in xrange(O_i.shape[0]):
+                            for l in xrange(O_i.shape[1]):
+                                gradient_t3[t] += 2.0 * self.beta * species_graph_adjacency[k, l] * (p[k] - p[l]) * (p[k]**2 * top[k] * O_i[k, t] - p[l]**2 * top[l] * O_i[l, t])
+
+            gradient = gradient_t1_t2 - gradient_t3
             logging.debug( 'gradient: %s', gradient)
             logging.debug( 'p: %s',  p)
 

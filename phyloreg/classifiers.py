@@ -9,6 +9,7 @@ import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.utils.graph import graph_laplacian
 from warnings import warn
+import matplotlib.pyplot as plt
 
 
 class RidgeRegression(BaseEstimator, ClassifierMixin):
@@ -171,7 +172,7 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
         The fitted model's coefficients (last value is the intercept if fit_intercept=True).
 
     """
-    def __init__(self, alpha=1.0, beta=0.0, normalize_laplacian=False, fit_intercept=False, opti_max_iter=1e4,
+    def __init__(self, alpha=1.0, beta=0.0, normalize_laplacian=False, fit_intercept=False, opti_max_iter=1e2,
                  opti_tol=1e-7, opti_learning_rate=1e-2, opti_learning_rate_decrease=1e-4, random_seed=42):
         # Classifier parameters
         self.alpha = float(alpha)
@@ -188,6 +189,10 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
         self.opti_learning_rate_decrease = opti_learning_rate_decrease
         self.opti_lookahead_steps = 50
         self.random_seed = random_seed
+        self.o1list = []
+        self.o2list = []
+        self.o3list = []
+
 
     def fit(self, X, X_species, y, orthologs, species_graph_adjacency, species_graph_names):
         """Fit the model
@@ -236,7 +241,6 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
             """
             o = 0.0
 
-            o3 = 0.0
 
             # Likelihood
             for i in xrange(X.shape[0]):
@@ -256,6 +260,8 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
 
             # L2 norm
             o2 = self.alpha * np.linalg.norm(w, ord=2)**2
+
+            o3 = 0.0
 
             # Manifold (computed for each example x_i)
             for i, x_i in enumerate(X):
@@ -282,6 +288,10 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
             logging.debug( ' \n o1: %s \n o2: %s \n o3: %s \n o: %s', o1, o2, o3, o )
             # print( ' \n o1: \n o2:  \n o3:  \n o: %s', o1, o2, o3, o )
 
+            self.o1list.append( o1)
+            self.o2list.append( o2)
+            self.o3list.append( o3)
+
 
             return o
 
@@ -296,6 +306,7 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
 
         # Compute the O^t x L x O product, where L is the block diagonal graph laplacian matrix
         L = graph_laplacian(species_graph_adjacency, normed=self.normalize_laplacian)
+        logging.debug( "\n\n\n\n\n L: %s \n\n\n\n\n", L)
         OLO = np.zeros((X.shape[1], X.shape[1]))
         for i, x_i in enumerate(X):
             # H5py doesn't support integer keys
@@ -370,6 +381,30 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
                  "iterations.")
 
         self.w = w
+
+        # plot objective values
+
+        # print 'o1: ', self.o1list
+        # print 'o2: ', self.o2list
+        # print 'o3: ', self.o3list
+
+        fig = plt.figure()
+
+        ax1 = fig.add_subplot(311)
+        ax1.set_ylim([ min(self.o1list), max( self.o1list)])
+        ax1.plot( range(iterations + 1 ), np.asarray( self.o1list, dtype= float), 'r-')
+
+        ax2 = fig.add_subplot(312)
+        ax2.set_ylim([ min(self.o2list), max( self.o2list)])
+        ax2.plot( range(iterations + 1), np.asarray( self.o2list, dtype= float), 'r-')
+
+        ax3 = fig.add_subplot(313)
+        ax3.set_ylim([ min(self.o3list), max( self.o3list)])
+        ax3.plot( range(iterations + 1), np.asarray( self.o3list, dtype= float), 'r-')
+
+        plt.savefig( 'alpha' + str( self.alpha ) + 'beta' + str( self.beta) + '.pdf' )
+
+
 
         # # Newton-Raphson method
         # # TODO: Can we use iterative reweighted least squares? I'm pretty sure we can.

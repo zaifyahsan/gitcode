@@ -6,9 +6,13 @@ import h5py as h
 import logging
 import numpy as np
 
+from itertools import product, izip
+from functools import partial
+from multiprocessing import Pool, cpu_count
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.utils.graph import graph_laplacian
 from warnings import warn
+
 import matplotlib.pyplot as plt
 
 
@@ -145,6 +149,45 @@ class RidgeRegression(BaseEstimator, ClassifierMixin):
         return np.dot(X, self.w).reshape(-1,)
 
 
+def parallel_objective_by_example(payload, w, idx_by_species, species_graph_adjacency, fit_intercept):
+    x_i, x_i_species, orthologs_i = payload[0], payload[1], payload[2]
+    if len(orthologs_i["species"]) > 0:
+       # Load the orthologs of X and create a matrix that also contains x
+       x_orthologs_species = [idx_by_species[s] for s in orthologs_i["species"]]
+       x_orthologs_feats = orthologs_i["X"]
+       if fit_intercept:
+           x_orthologs_feats = np.hstack((x_orthologs_feats, np.ones(x_orthologs_feats.shape[0]).reshape(-1, 1)))  # Add this bias term
+
+       O_i = np.zeros((species_graph_adjacency.shape[0], x_orthologs_feats.shape[1]))
+       O_i[x_orthologs_species] = x_orthologs_feats
+       O_i[idx_by_species[x_i_species]] = x_i
+
+       p = 1.0 / (1.0 + np.exp(-np.dot(O_i, w)))
+       return 2.0 * sum(species_graph_adjacency[k, l] * (p[k] - p[l])**2 for k in xrange(O_i.shape[0]) for l in xrange(k))
+    else:
+       return 0.0
+
+
+def parallel_gradient_by_example(payload, w, t, idx_by_species, species_graph_adjacency, fit_intercept):
+    x_i, x_i_species, orthologs_i = payload[0], payload[1], payload[2]
+    if len(orthologs_i["species"]) > 0:
+        # Load the orthologs of X and create a matrix that also contains x
+        x_orthologs_species = [idx_by_species[s] for s in orthologs_i["species"]]
+        x_orthologs_feats = orthologs_i["X"]
+        if fit_intercept:
+            x_orthologs_feats = np.hstack((x_orthologs_feats, np.ones(x_orthologs_feats.shape[0]).reshape(-1, 1)))  # Add this bias term
+
+        O_i = np.zeros((species_graph_adjacency.shape[0], x_orthologs_feats.shape[1]))
+        O_i[x_orthologs_species] = x_orthologs_feats
+        O_i[idx_by_species[x_i_species]] = x_i
+
+        p = 1.0 / (1.0 + np.exp(-np.dot(O_i, w)))
+        top = np.exp(-np.dot(O_i, w))
+        return 4.0 * sum(species_graph_adjacency[k, l] * (p_k - p_l) * (p_k**2 * top_k * O_i_k[t] - p_l**2 * top_l * O_i_l[t]) for k, (O_i_k, p_k, top_k) in enumerate(izip(O_i, top, p)) for l, (O_i_l, p_l, top_l) in enumerate(izip(O_i, top, p)) if k < l)
+    else:
+        return 0.0
+
+
 class LogisticRegression(BaseEstimator, ClassifierMixin):
     """Logistic regression species-level with phylogenetic regularization
 
@@ -173,7 +216,8 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
 
     """
     def __init__(self, alpha=1.0, beta=0.0, normalize_laplacian=False, fit_intercept=False, opti_max_iter=1e2,
-                 opti_tol=1e-7, opti_learning_rate=1e-2, opti_learning_rate_decrease=1e-4, random_seed=42):
+                 opti_tol=1e-7, opti_learning_rate=1e-2, opti_learning_rate_decrease=1e-4, random_seed=42,
+                 n_cpu=-1):
         # Classifier parameters
         self.alpha = float(alpha)
         self.beta = float(beta)
@@ -192,7 +236,7 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
         self.o1list = []
         self.o2list = []
         self.o3list = []
-
+        self.n_cpu = cpu_count() if n_cpu == -1 else n_cpu
 
     def fit(self, X, X_species, y, orthologs, species_graph_adjacency, species_graph_names):
         """Fit the model
@@ -263,27 +307,14 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
 
             o3 = 0.0
 
-            # Manifold (computed for each example x_i)
-            for i, x_i in enumerate(X):
-                # H5py doesn't support integer keys
-                if isinstance(orthologs, h.File):
-                    i = str(i)
-
-                if len(orthologs[i]["species"]) > 0:
-                    # Load the orthologs of X and create a matrix that also contains x
-                    x_orthologs_species = [idx_by_species[s] for s in orthologs[i]["species"]]
-                    x_orthologs_feats = orthologs[i]["X"]
-                    if self.fit_intercept:
-                        x_orthologs_feats = np.hstack((x_orthologs_feats, np.ones(x_orthologs_feats.shape[0]).reshape(-1, 1)))  # Add this bias term
-
-                    O_i = np.zeros((len(species_graph_names), x_orthologs_feats.shape[1]))
-                    O_i[x_orthologs_species] = x_orthologs_feats
-                    O_i[idx_by_species[X_species[i]]] = x_i
-
-                    p = 1.0 / (1.0 + np.exp(-np.dot(O_i, w)))
-                    for k in xrange(O_i.shape[0]):
-                        for l in xrange(O_i.shape[1]):
-                            o3 += self.beta * species_graph_adjacency[k, l] * (p[k] - p[l])**2
+            if self.beta > 0:
+                func = partial(parallel_objective_by_example, w=w, idx_by_species=idx_by_species,
+                                                             species_graph_adjacency=species_graph_adjacency,
+                                                             fit_intercept=self.fit_intercept)
+                pool = Pool(self.n_cpu)
+                for v in pool.imap_unordered(func, izip(X, X_species, (orthologs[i] for i in xrange(X.shape[0])))):
+                    o3 += v
+                o3 *= self.beta
 
             o = o1 - o2 - o3
 
@@ -293,7 +324,6 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
             self.o1list.append( o1)
             self.o2list.append( o2)
             self.o3list.append( o3)
-
 
             return o
 
@@ -306,28 +336,28 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
         if self.fit_intercept:
             X = np.hstack((X, np.ones(X.shape[0]).reshape(-1, 1)))
 
-        # Compute the O^t x L x O product, where L is the block diagonal graph laplacian matrix
-        L = graph_laplacian(species_graph_adjacency, normed=self.normalize_laplacian)
-        logging.debug( "\n\n\n\n\n L: %s \n\n\n\n\n", L)
-        OLO = np.zeros((X.shape[1], X.shape[1]))
-        for i, x_i in enumerate(X):
-            # H5py doesn't support integer keys
-            if isinstance(orthologs, h.File):
-                i = str(i)
-
-            if len(orthologs[i]["species"]) > 0:
-                # Load the orthologs of X and create a matrix that also contains x
-                x_orthologs_species = [idx_by_species[s] for s in orthologs[i]["species"]]
-                x_orthologs_feats = orthologs[i]["X"]
-                if self.fit_intercept:
-                    x_orthologs_feats = np.hstack((x_orthologs_feats, np.ones(x_orthologs_feats.shape[0]).reshape(-1, 1)))  # Add this bias term
-
-                O_i = np.zeros((len(species_graph_names), x_orthologs_feats.shape[1]))
-                O_i[x_orthologs_species] = x_orthologs_feats
-                O_i[idx_by_species[X_species[i]]] = x_i
-
-                # Compute the efficient product and add it to the nasty product
-                OLO += np.dot(np.dot(O_i.T, L), O_i)
+        # # Compute the O^t x L x O product, where L is the block diagonal graph laplacian matrix
+        # L = graph_laplacian(species_graph_adjacency, normed=self.normalize_laplacian)
+        # logging.debug( "\n\n\n\n\n L: %s \n\n\n\n\n", L)
+        # OLO = np.zeros((X.shape[1], X.shape[1]))
+        # for i, x_i in enumerate(X):
+        #     # H5py doesn't support integer keys
+        #     if isinstance(orthologs, h.File):
+        #         i = str(i)
+        #
+        #     if len(orthologs[i]["species"]) > 0:
+        #         # Load the orthologs of X and create a matrix that also contains x
+        #         x_orthologs_species = [idx_by_species[s] for s in orthologs[i]["species"]]
+        #         x_orthologs_feats = orthologs[i]["X"]
+        #         if self.fit_intercept:
+        #             x_orthologs_feats = np.hstack((x_orthologs_feats, np.ones(x_orthologs_feats.shape[0]).reshape(-1, 1)))  # Add this bias term
+        #
+        #         O_i = np.zeros((len(species_graph_names), x_orthologs_feats.shape[1]))
+        #         O_i[x_orthologs_species] = x_orthologs_feats
+        #         O_i[idx_by_species[X_species[i]]] = x_i
+        #
+        #         # Compute the efficient product and add it to the nasty product
+        #         OLO += np.dot(np.dot(O_i.T, L), O_i)
 
         logging.debug("Initiating gradient ascent")
 
@@ -341,6 +371,7 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
         lookahead_count = 0
 
         # Ascend that gradient!
+        pool = Pool(self.n_cpu)  # Initialize parallel pool
         iterations = 0
         objective_val = lookahead_optimum
         while iterations < self.opti_max_iter:
@@ -352,28 +383,13 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
             gradient_t1_t2 = np.dot(X.T, y - p) / X.shape[0] - 2.0 * self.alpha * w
 
             gradient_t3 = np.zeros(X.shape[1])
-            for t in xrange(len(gradient_t3)):
-                for i, x_i in enumerate(X):
-                    # H5py doesn't support integer keys
-                    if isinstance(orthologs, h.File):
-                        i = str(i)
-
-                    if len(orthologs[i]["species"]) > 0:
-                        # Load the orthologs of X and create a matrix that also contains x
-                        x_orthologs_species = [idx_by_species[s] for s in orthologs[i]["species"]]
-                        x_orthologs_feats = orthologs[i]["X"]
-                        if self.fit_intercept:
-                            x_orthologs_feats = np.hstack((x_orthologs_feats, np.ones(x_orthologs_feats.shape[0]).reshape(-1, 1)))  # Add this bias term
-
-                        O_i = np.zeros((len(species_graph_names), x_orthologs_feats.shape[1]))
-                        O_i[x_orthologs_species] = x_orthologs_feats
-                        O_i[idx_by_species[X_species[i]]] = x_i
-
-                        p = 1.0 / (1.0 + np.exp(-np.dot(O_i, w)))
-                        top = np.exp(-np.dot(O_i, w))
-                        for k in xrange(O_i.shape[0]):
-                            for l in xrange(O_i.shape[1]):
-                                gradient_t3[t] += 2.0 * self.beta * species_graph_adjacency[k, l] * (p[k] - p[l]) * (p[k]**2 * top[k] * O_i[k, t] - p[l]**2 * top[l] * O_i[l, t])
+            if self.beta > 0.0:
+                for t in xrange(len(gradient_t3)):
+                    func = partial(parallel_gradient_by_example, t=t, w=w, idx_by_species=idx_by_species,
+                                                             species_graph_adjacency=species_graph_adjacency,
+                                                             fit_intercept=self.fit_intercept)
+                    for v in pool.imap_unordered(func, izip(X, X_species, (orthologs[i] for i in xrange(X.shape[0])))):
+                        gradient_t3[t] += self.beta * v
 
             gradient = gradient_t1_t2 - gradient_t3
             logging.debug( 'gradient: %s', gradient)
@@ -407,6 +423,9 @@ class LogisticRegression(BaseEstimator, ClassifierMixin):
                           " of iterations.")
             warn("The maximum number of iterations was reached prior to convergence. Try increasing the number of "
                  "iterations.")
+
+        pool.close()  # Close parallel pool
+        del pool
 
         self.w = w
 
